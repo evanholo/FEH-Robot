@@ -1,0 +1,953 @@
+#include <FEHLCD.h>
+#include <FEHIO.h>
+#include <FEHUtility.h>
+#include <FEHMotor.h>
+#include <FEHRPS.h>
+#include <FEHBattery.h>
+#include <FEHServo.h>
+#include <FEHSD.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+ 
+// Number of points of interest (i.e. A, B, C, D)
+#define NUM_POINTS_OF_INTEREST 1
+ 
+// RPS Delay time
+#define RPS_WAIT_TIME_IN_SEC 0.35
+ 
+/* Defines for how long each pulse should be and at what motor power.
+These value will normally be small, but you should play around with the values to find what works best */
+#define PULSE_TIME 0.05
+#define PULSE_POWER 25
+ 
+// Define for the motor power while driving (not pulsing)
+#define POWER 25
+ 
+#define HEADING_TOLERANCE 2
+ 
+/* Direction along axis which robot is traveling
+Examples:
+	- if robot is traveling to the upper level, that is a PLUS as the y-coordinate is increasing
+	- if robot is traveling to the lower level, that is a MINUS as the y-coordinate is decreasing
+*/
+#define PLUS 0
+#define MINUS 1
+ 
+#define PI 3.14159265
+#define WHEEL_DIA 2.5
+#define TURN_DIAMETER 7.5
+#define RIGHT_TURN_ADJUST 1.25
+#define LEFT_TURN_ADJUST 1.25
+ 
+#define SERVO_MIN 700
+#define SERVO_MAX 2410
+ 
+// default motor power
+#define POWER 25
+ 
+// Lever Constants
+#define LEFT_LEVER 0
+#define MIDDLE_LEVER 1
+#define RIGHT_LEVER 2
+ 
+// Hardcoded RPS anchor points
+#define CDS_X
+#define CDS_Y
+ 
+// Line states for line following
+enum LineStates
+{
+	MIDDLE,
+	RIGHT,
+	LEFT,
+	LEFT_MIDDLE,
+	RIGHT_MIDDLE,
+	OFF
+};
+ 
+// Colors for cds cell
+enum Color
+{
+	NONE,
+	BLUE_LIGHT,
+	RED_LIGHT
+};
+ 
+// Declarations for encoders & motors
+DigitalEncoder right_encoder(FEHIO::P1_0);
+DigitalEncoder left_encoder(FEHIO::P1_1);
+FEHMotor right_motor(FEHMotor::Motor0, 9.0);
+FEHMotor left_motor(FEHMotor::Motor1, 9.0);
+// 25 motor power provides the most accurate count distance
+ 
+// Servo declarations
+FEHServo servo_arm(FEHServo::Servo0);
+ 
+// Microswitch definitions
+DigitalInputPin FL_bumper(FEHIO::P2_0); // Front left
+DigitalInputPin FR_bumper(FEHIO::P2_1); // Front right
+DigitalInputPin BL_bumper(FEHIO::P2_2); // Back left
+DigitalInputPin BR_bumper(FEHIO::P2_3); // Back right
+ 
+// CDS Cell
+AnalogInputPin CdS_cell(FEHIO::P0_0);
+ 
+// Line follower definitons
+AnalogInputPin left_follower(FEHIO::P0_7);
+AnalogInputPin middle_follower(FEHIO::P0_5);
+AnalogInputPin right_follower(FEHIO::P0_3);
+ 
+void move_forward(int percent, double distance, double timeout = 10);
+void move_backward(int percent, double distance, double timeout = 10);
+ 
+void wide_left(int percent, double degrees);
+void wide_right(int percent, double degrees);
+ 
+void rotate_left(int percent, double degrees);
+void rotate_right(int percent, double degrees);
+// double right_turn_adjust(double deg);
+ 
+void align_front(int percent, double timeout = 10);
+void align_back(int percent, double timeout = 10);
+ 
+void follow_line(double seconds);
+enum Color search(int percent, double time);
+ 
+enum LineStates getLineState();
+enum Color cds_color();
+ 
+void set_points_of_interest();
+void pulse_forward(int percent, float seconds);
+void pulse_counterclockwise(int percent, float seconds);
+void check_x(float x_coordinate, int orientation);
+void check_y(float y_coordinate, int orientation);
+void check_heading(float heading);
+void drive_to(float x_target, float y_target, float heading_target);
+ 
+int main(void)
+{
+ 
+	// Initialize RPS
+	RPS.InitializeTouchMenu();
+ 
+	Sleep(0.1);
+ 
+	set_points_of_interest();
+ 
+	Sleep(0.5);
+ 
+	float touch_x, touch_y;
+	LCD.Clear();
+	LCD.WriteLine("Press Screen To Start Run");
+	while (!LCD.Touch(&touch_x, &touch_y))
+    	;
+	while (LCD.Touch(&touch_x, &touch_y))
+    	;
+ 
+	// Read POIS
+	float A_x, A_y;
+ 
+	FEHFile *fptr = SD.FOpen("RPS_POIs.txt", "r");
+	SD.FScanf(fptr, "%f%f", &A_x, &A_y);
+	SD.FClose(fptr);
+ 
+	// Initialize Servo Motor
+	servo_arm.SetMin(SERVO_MIN);
+	servo_arm.SetMax(SERVO_MAX);
+ 
+	servo_arm.SetDegree(90);
+ 
+	// Declare timeout time
+	double time_start = TimeNow();
+	double timeout = 30;
+	double light = CdS_cell.Value();
+	while (cds_color() == NONE && TimeNow() - time_start < timeout)
+	{
+    	light = CdS_cell.Value();
+    	LCD.WriteLine(light);
+    	Sleep(0.5);
+    	LCD.Clear();
+	}
+	LCD.WriteLine("LESSSGOOOOO");
+ 
+	// Lower half of course
+ 
+	int correctLever = RPS.GetCorrectLever();
+	move_forward(POWER, 2);
+	rotate_left(POWER, 45);
+	move_forward(POWER, 14);
+	rotate_left(POWER, 60);
+	check_heading(180);
+	move_forward(POWER, 9.5);
+	rotate_left(POWER, 90);
+ 
+	// Check which lever to flip and perform some action
+	if (correctLever == RIGHT_LEVER)
+	{
+    	LCD.WriteLine("RIGHT");
+    	// Perform actions to flip right lever
+    	rotate_right(POWER, 31);
+ 
+    	servo_arm.SetDegree(150);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(70);
+    	Sleep(0.3);
+ 
+    	move_backward(POWER, 2.5);
+ 
+    	servo_arm.SetDegree(180);
+ 
+    	Sleep(5.0);
+ 
+    	move_forward(POWER, 2.5);
+ 
+    	servo_arm.SetDegree(120);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(180);
+    	Sleep(0.3);
+ 
+    	rotate_left(POWER, 31);
+    	// navigate to the luggage station
+	}
+	else if (correctLever == LEFT_LEVER)
+	{
+    	LCD.WriteLine("LEFT");
+    	rotate_left(POWER, 25);
+ 
+    	servo_arm.SetDegree(150);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(90);
+    	Sleep(0.3);
+ 
+    	move_backward(POWER, 2.5);
+ 
+    	servo_arm.SetDegree(180);
+ 
+    	Sleep(5.0);
+ 
+    	move_forward(POWER, 2.5);
+ 
+    	servo_arm.SetDegree(120);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(180);
+    	Sleep(0.3);
+ 
+    	rotate_right(POWER, 25);
+    	// navigate to the luggage station
+	}
+	else if (correctLever == MIDDLE_LEVER)
+	{
+    	LCD.WriteLine("MIDDLE");
+    	pulse_counterclockwise(-POWER, 0.1);
+ 
+    	servo_arm.SetDegree(150);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(90);
+    	Sleep(0.3);
+ 
+    	move_backward(POWER, 3);
+ 
+    	servo_arm.SetDegree(180);
+ 
+    	Sleep(5.0);
+ 
+    	move_forward(POWER, 2.5);
+ 
+    	servo_arm.SetDegree(120);
+    	Sleep(0.3);
+    	servo_arm.SetDegree(180);
+    	Sleep(0.3);
+ 
+    	pulse_counterclockwise(POWER, 0.1);
+ 
+    	// navigate to the luggage station
+	}
+ 
+	// navigate to luggage and dump
+	Sleep(0.2);
+	move_backward(POWER, 2);
+	servo_arm.SetDegree(80);
+ 
+	rotate_right(POWER, 75);
+ 
+	move_backward(POWER, 4);
+	rotate_left(POWER, 74);
+	align_back(35, 5);
+ 
+	// Traverse up ramp
+	move_forward(POWER, 8);
+ 
+	rotate_right(POWER, 90);
+	Sleep(0.3);
+ 
+	check_heading(180);
+ 
+	align_front(POWER, 10);
+	move_backward(POWER, 1.7);
+	rotate_right(POWER, 90);
+	move_forward(30, 30);
+ 
+	// UPPER HALF OF COURSE
+ 
+	// Find Light
+ 
+	// drive_to(A_x, A_y, 90);
+	// enum Color light_color = search(POWER, 20);
+ 
+	rotate_right(POWER, 90);
+	align_back(POWER, 3);
+	move_forward(POWER, 10);
+	rotate_left(POWER, 90);
+	check_heading(90);
+	enum Color light_color = search(POWER, 10);
+ 
+	//  Display Color detected
+	LCD.Clear();
+	if (light_color == RED_LIGHT)
+	{
+    	LCD.SetBackgroundColor(RED);
+    	LCD.Clear();
+	}
+	else if (light_color == BLUE_LIGHT)
+	{
+    	LCD.SetBackgroundColor(BLUE);
+    	LCD.Clear();
+	}
+	else
+	{
+    	LCD.WriteLine("NO COLOR FOUND :'(");
+	}
+ 
+	move_backward(POWER, 10);
+	rotate_right(POWER, 90);
+	align_back(POWER, 5);
+ 
+	// Press correct button
+	if (light_color == RED_LIGHT)
+	{
+    	move_forward(POWER, 20);
+	}
+	else // Default to blue light
+	{
+    	move_forward(POWER, 14);
+	}
+ 
+	rotate_left(POWER, 90);
+	check_heading(90);
+ 
+	align_front(30, 5);
+ 
+	// Back away from buttons
+	move_backward(POWER, 7);
+	rotate_right(POWER, 90);
+ 
+	// Lever flip depending on which button pressed
+	if (light_color == RED_LIGHT)
+	{
+    	move_backward(POWER, 7);
+    	servo_arm.SetDegree(180);
+    	move_forward(POWER, 5.5);
+    	servo_arm.SetDegree(80);
+    	// move_forward(30, 2);
+	}
+	else
+	{
+    	servo_arm.SetDegree(180);
+    	move_forward(POWER, 5);
+    	servo_arm.SetDegree(80);
+    	// move_forward(30, 2);
+	}
+ 
+	Sleep(0.5);
+ 
+	rotate_right(POWER, 90);
+	move_forward(POWER, 6);
+	rotate_left(POWER, 90);
+	align_front(POWER, 10);
+	move_backward(POWER, 1.7);
+	rotate_right(POWER, 90);
+ 
+	align_front(35, 60);
+ 
+	return 0;
+}
+ 
+enum Color search(int percent, double time)
+{ 
+	double time_start = TimeNow();
+	enum Color color = cds_color();
+	bool color_found = false;
+ 
+	// Drive forward until light found
+	while (!color_found && TimeNow() - time_start < time)
+	{
+    	move_forward(POWER, 0.05);
+    	color = cds_color();
+    	if (color != NONE)
+    	{
+        	color_found = true;
+    	}
+	}
+ 
+	// If light detected is blue, check more closely to see if it is red.
+	if (color == BLUE_LIGHT)
+	{
+    	int temp_color;
+    	for (int i = 0; i < 10; i++)
+    	{
+        	move_forward(20, 0.05);
+        	temp_color = cds_color();
+        	if (temp_color == RED_LIGHT)
+        	{
+            	color = RED_LIGHT;
+        	}
+    	}
+    	for (int i = 0; i < 10; i++)
+    	{
+        	move_backward(20, 0.05);
+        	temp_color = cds_color();
+        	if (temp_color == RED_LIGHT)
+        	{
+            	color = RED_LIGHT;
+        	}
+    	}
+	}
+ 
+	return color;
+ 
+}
+ 
+void move_forward(int percent, double distance, double timeout) // using encoders
+{
+ 
+	int time_start = TimeNow();
+	int counts = (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// Reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// Set both motors to desired percent
+	right_motor.SetPercent(percent);
+	left_motor.SetPercent(percent);
+ 
+	// While the average of the left and right encoder is less than counts,
+	// keep running motors
+	while (((left_encoder.Counts() + right_encoder.Counts()) / 2. < counts) && TimeNow() - time_start < timeout)
+    	;
+ 
+	// Turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+void move_backward(int percent, double distance, double timeout) // using encoders
+{
+ 
+	double time_start = TimeNow();
+	int counts = (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// Reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// Set both motors to desired percent
+	right_motor.SetPercent(-percent);
+	left_motor.SetPercent(-percent);
+ 
+	// While the average of the left and right encoder is less than counts,
+	// keep running motors
+	while (((left_encoder.Counts() + right_encoder.Counts()) / 2. < counts) && TimeNow() - time_start < timeout)
+    	;
+ 
+	// Turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+void wide_left(int percent, double degrees)
+{
+ 
+	// Convert degrees to distance along turn circumference
+	int distance = ((degrees * PI) / 180) * (TURN_DIAMETER);
+ 
+	int counts = LEFT_TURN_ADJUST * (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// set motors to desired percent
+	right_motor.SetPercent(percent);
+ 
+	// run motors until desired angle reached
+	while ((left_encoder.Counts() < counts))
+    	;
+ 
+	// turn off motors
+	left_motor.Stop();
+}
+ 
+void wide_right(int percent, double degrees)
+{
+	// Convert degrees to distance along turn circumference
+	int distance = ((degrees * PI) / 180) * (TURN_DIAMETER);
+ 
+	int counts = RIGHT_TURN_ADJUST * (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// set motors to desired percent
+	left_motor.SetPercent(percent);
+ 
+	// run motors until desired angle reached
+	while ((right_encoder.Counts() < counts))
+    	;
+ 
+	// turn off motors
+	right_motor.Stop();
+}
+ 
+void rotate_left(int percent, double degrees)
+{
+ 
+	// Convert degrees to distance along turn circumference
+	int distance = ((degrees * PI) / 180) * (TURN_DIAMETER / 2);
+ 
+	int counts = LEFT_TURN_ADJUST * (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// set motors to desired percent
+	right_motor.SetPercent(percent);
+	left_motor.SetPercent(percent * -1);
+ 
+	// run motors until desired angle reached
+	while ((left_encoder.Counts() < counts && right_encoder.Counts() < counts))
+    	;
+ 
+	// turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+void rotate_right(int percent, double degrees)
+{
+	// Convert degrees to distance along turn circumference
+	int distance = ((degrees * PI) / 180) * (TURN_DIAMETER / 2);
+ 
+	int counts = RIGHT_TURN_ADJUST * (distance * 318) / (2 * PI * (WHEEL_DIA / 2));
+ 
+	// reset encoder counts
+	right_encoder.ResetCounts();
+	left_encoder.ResetCounts();
+ 
+	// set motors to desired percent
+	right_motor.SetPercent(percent * -1);
+	left_motor.SetPercent(percent);
+ 
+	// run motors until desired angle reached
+	while ((left_encoder.Counts() < counts && right_encoder.Counts() < counts))
+    	;
+ 
+	// turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+// Drive forward until front bumpers hit something
+void align_front(int percent, double timeout)
+{
+	double time_start = TimeNow();
+	while ((FL_bumper.Value() == true || FR_bumper.Value() == true) && TimeNow() - time_start < timeout)
+	{
+    	move_forward(percent, .1);
+	}
+}
+ 
+// Drive backward until back bumpers hit something
+void align_back(int percent, double timeout)
+{
+	double time_start = TimeNow();
+	while ((BL_bumper.Value() == true || BR_bumper.Value() == true) && TimeNow() - time_start < timeout)
+	{
+    	move_backward(percent, .1);
+	}
+}
+
+
+ 
+void follow_line(double seconds)
+{
+	enum LineStates state = getLineState(); // Set the initial state
+	double time_start = TimeNow();
+ 
+	while (TimeNow() - time_start < seconds)
+	{
+    	state = getLineState();
+ 
+    	switch (state)
+    	{
+    	case MIDDLE: // If I am in the middle of the line drive straight
+    	case OFF:	// Drive forward to look for line
+        	right_motor.SetPercent(20);
+        	left_motor.SetPercent(20);
+ 
+        	break;
+    	// If the right sensor is on the line turn left
+    	case RIGHT:
+        	right_motor.SetPercent(20);
+        	left_motor.SetPercent(5);
+ 
+        	break;
+    	// If left on line, turn right
+    	case LEFT:
+        	right_motor.SetPercent(5);
+        	left_motor.SetPercent(20);
+ 
+        	break;
+    	// If both right and middle on line, turn a little left
+    	case RIGHT_MIDDLE:
+        	right_motor.SetPercent(15);
+        	left_motor.SetPercent(20);
+ 
+        	break;
+    	// If both left and middle on line, turn a little right
+    	case LEFT_MIDDLE:
+        	right_motor.SetPercent(20);
+        	left_motor.SetPercent(15);
+ 
+        	break;
+    	default: // Error. Something is very wrong.
+ 
+        	break;
+    	}
+    	// Sleep a bit
+    	Sleep(100);
+	}
+}
+ 
+enum LineStates getLineState()
+{
+	enum LineStates state;
+	if (left_follower.Value() > 2) // Left on line
+	{
+    	state = LEFT;
+    	if (middle_follower.Value() > 2) // Middle on line
+    	{
+        	state = LEFT_MIDDLE;
+    	}
+	}
+	else if (right_follower.Value() > 2) // Right on line
+	{
+    	state = RIGHT;
+    	if (middle_follower.Value() > 2) // Middle on line
+    	{
+        	state = RIGHT_MIDDLE;
+    	}
+	}
+	else if (middle_follower.Value() > 2) // Middle on line
+	{
+    	state = MIDDLE;
+	}
+	else
+	{
+    	state = OFF;
+	}
+ 
+	return state;
+}
+ 
+enum Color cds_color()
+{
+	enum Color color = NONE;
+	double light = CdS_cell.Value();
+ 
+	if (light < 0.55)
+	{
+    	color = RED_LIGHT;
+	}
+	else if (light < 1)
+	{
+    	color = BLUE_LIGHT;
+	}
+ 
+	return color;
+}
+ 
+// RPS FUNCTIONS
+ 
+void set_points_of_interest()
+{
+	// Declare variables
+	float touch_x, touch_y;
+	char points[4] = {'A', 'B', 'C', 'D'};
+ 
+	// Open SD file for writing
+	FEHFile *fptr = SD.FOpen("RPS_POIs.txt", "w");
+ 
+	Sleep(100);
+	LCD.Clear();
+ 
+	// Wait for touchscreen to be pressed and released
+	LCD.WriteLine("Press Screen to Record");
+	while (!LCD.Touch(&touch_x, &touch_y))
+    	;
+	while (LCD.Touch(&touch_x, &touch_y))
+    	;
+ 
+	LCD.ClearBuffer();
+ 
+	// Clear screen
+	Sleep(100); // wait for 100ms to avoid updating the screen too quickly
+	LCD.Clear();
+ 
+	// Write initial screen info
+	LCD.WriteRC("X Position:", 11, 0);
+	LCD.WriteRC("Y Position:", 12, 0);
+	LCD.WriteRC("   Heading:", 13, 0);
+ 
+	// Step through each path point to record position and heading
+	for (int n = 0; n < NUM_POINTS_OF_INTEREST; n++)
+	{
+    	// Write point letter
+    	LCD.WriteRC("Touch to set point ", 9, 0);
+    	LCD.WriteRC(points[n], 9, 20);
+ 
+    	// Wait for touchscreen to be pressed and display RPS data
+    	while (!LCD.Touch(&touch_x, &touch_y))
+    	{
+        	LCD.WriteRC(RPS.X(), 11, 12);   	// update the x coordinate
+        	LCD.WriteRC(RPS.Y(), 12, 12);   	// update the y coordinate
+        	LCD.WriteRC(RPS.Heading(), 13, 12); // update the heading
+ 
+        	Sleep(100); // wait for 100ms to avoid updating the screen too quickly
+    	}
+    	while (LCD.Touch(&touch_x, &touch_y))
+        	;
+    	LCD.ClearBuffer();
+ 
+    	// Print RPS data for this path point to file
+    	SD.FPrintf(fptr, "%f %f\n", RPS.X(), RPS.Y());
+	}
+ 
+	// Close SD file
+	SD.FClose(fptr);
+	LCD.Clear();
+}
+ 
+/*
+ * Pulse forward a short distance using time
+ */
+void pulse_forward(int percent, float seconds)
+{
+	// Set both motors to desired percent
+	right_motor.SetPercent(percent);
+	left_motor.SetPercent(percent);
+ 
+	// Wait for the correct number of seconds
+	Sleep(seconds);
+ 
+	// Turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+/*
+ * Pulse counterclockwise a short distance using time
+ */
+void pulse_counterclockwise(int percent, float seconds)
+{
+	// Set both motors to desired percent
+	right_motor.SetPercent(percent);
+	left_motor.SetPercent(-percent);
+ 
+	// Wait for the correct number of seconds
+	Sleep(seconds);
+ 
+	// Turn off motors
+	right_motor.Stop();
+	left_motor.Stop();
+}
+ 
+/*
+ * Use RPS to move to the desired x_coordinate based on the orientation of the QR code
+ */
+void check_x(float x_coordinate, int orientation)
+{
+	// Determine the direction of the motors based on the orientation of the QR code
+	int power = PULSE_POWER;
+	if (orientation == MINUS)
+	{
+    	power = -PULSE_POWER;
+	}
+ 
+	// Check if receiving proper RPS coordinates and whether the robot is within an acceptable range
+	while (RPS.X() > 0 && (RPS.X() < x_coordinate - 1 || RPS.X() > x_coordinate + 1))
+	{
+    	if (RPS.X() > x_coordinate)
+    	{
+        	// Pulse the motors for a short duration in the correct direction
+        	pulse_forward(-power, PULSE_TIME);
+    	}
+    	else if (RPS.X() < x_coordinate)
+    	{
+        	// Pulse the motors for a short duration in the correct direction
+        	pulse_forward(power, PULSE_TIME);
+    	}
+    	Sleep(RPS_WAIT_TIME_IN_SEC);
+	}
+}
+ 
+/*
+ * Use RPS to move to the desired y_coordinate based on the orientation of the QR code
+ */
+void check_y(float y_coordinate, int orientation)
+{
+	// Determine the direction of the motors based on the orientation of the QR code
+	int power = PULSE_POWER;
+	if (orientation == MINUS)
+	{
+    	power = -PULSE_POWER;
+	}
+ 
+	// Check if receiving proper RPS coordinates and whether the robot is within an acceptable range
+	while (RPS.Y() > 0 && (RPS.Y() < y_coordinate - 1 || RPS.Y() > y_coordinate + 1))
+	{
+    	if (RPS.Y() > y_coordinate)
+    	{
+        	// Pulse the motors for a short duration in the correct direction
+        	pulse_forward(-power, PULSE_TIME);
+    	}
+    	else if (RPS.Y() < y_coordinate)
+	    {
+        	// Pulse the motors for a short duration in the correct direction
+        	pulse_forward(power, PULSE_TIME);
+    	}
+    	Sleep(RPS_WAIT_TIME_IN_SEC);
+	}
+}
+ 
+/*
+ * Use RPS to move to the desired heading
+ */
+void check_heading(float heading)
+{
+	// You will need to fill out this one yourself and take into account
+	// checking for proper RPS data and the edge conditions
+	//(when you want the robot to go to 0 degrees or close to 0 degrees)
+	if (RPS.X() > 0)
+	{
+    	if (heading > 355 || heading < 5)
+    	{
+        	while (RPS.Heading() < heading - HEADING_TOLERANCE || RPS.Heading() > heading + HEADING_TOLERANCE)
+        	{
+ 
+            	if (RPS.Heading() > 5 && RPS.Heading() <= 179)
+            	{
+                	pulse_counterclockwise(PULSE_POWER, PULSE_TIME);
+            	}
+            	else if (RPS.Heading() > 179 && RPS.Heading() < 355)
+            	{
+                	pulse_counterclockwise(-PULSE_POWER, PULSE_TIME);
+            	}
+            	Sleep(RPS_WAIT_TIME_IN_SEC);
+        	}
+    	}
+    	else
+    	{
+        	while (RPS.Heading() < heading - HEADING_TOLERANCE || RPS.Heading() > heading + HEADING_TOLERANCE)
+        	{
+            	if (RPS.Heading() > heading)
+            	{
+                	pulse_counterclockwise(-PULSE_POWER, PULSE_TIME);
+            	}
+      	      else if (RPS.Heading() < heading)
+            	{
+                	pulse_counterclockwise(PULSE_POWER, PULSE_TIME);
+            	}
+            	Sleep(RPS_WAIT_TIME_IN_SEC);
+        	}
+    	}
+	}
+}
+ 
+// Uses RPS to drive straight to a given point on the course
+void drive_to(float x_target, float y_target, float heading_target)
+{
+	Sleep(RPS_WAIT_TIME_IN_SEC);
+ 
+	// Get current heading and position
+	float x_current = RPS.X();
+	float y_current = RPS.Y();
+	float heading_current = RPS.Heading();
+ 
+	// Calculate angle needed to travel
+	float d_x = x_target - x_current;
+	float d_y = y_target - y_current;
+ 
+	float head = (180 * atan(d_y / d_x)) / PI;
+ 
+	// Adjust heading to be in correct quadrant
+	if (d_x < 0) // Second quadrant or Third quadrant
+	{
+    	head += 180;
+	}
+	else if (d_y < 0) // Fourth quadrant
+	{
+    	head += 360;
+	}
+ 
+	// Turn using shaft encoding to desired angle
+	float turn_amount = head - heading_current;
+ 
+	if (turn_amount < 0) // Need to turn clockwise
+	{
+    	rotate_right(POWER, abs(turn_amount));
+	}
+	else if (turn_amount > 0) // Need to turn counterclockwise
+	{
+    	rotate_left(POWER, abs(turn_amount));
+	}
+ 
+	// Check heading on the turn
+	check_heading(head);
+ 
+	// Calculate distance need to travel based on new position of robot after turn
+ 
+	x_current = RPS.X();
+	y_current = RPS.Y();
+	heading_current = RPS.Heading();
+ 
+	// Calculate angle needed to travel
+	d_x = x_target - x_current;
+	d_y = y_target - y_current;
+ 
+	float dist = sqrt(d_x * d_x + d_y * d_y);
+ 
+	// Travel that distance using shaft encoding
+	move_forward(POWER, dist);
+ 
+	// Check position?  (Check X if more horizontal) (Check Y if more vertical)
+	if ((RPS.Heading() > 45 && RPS.Heading() < 135))
+	{
+    	check_y(y_target, PLUS);
+	}
+	else if ((RPS.Heading() > 135 && RPS.Heading() < 225))
+	{
+    	check_x(x_target, MINUS);
+	}
+	else if ((RPS.Heading() > 225 && RPS.Heading() < 315))
+	{
+    	check_y(y_target, MINUS);
+	}
+	else
+	{
+    	check_x(x_target, PLUS);
+	}
+}
